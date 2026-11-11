@@ -40,11 +40,11 @@ fn run(command_line: CommandLine) -> githubdw::Result<ExitCode> {
         Command::Query(arguments) => report::query(open_warehouse(db)?, *arguments).map(ok),
         Command::Metrics { command } => report::metrics(open_warehouse(db)?, command).map(ok),
         Command::Search(arguments) => report::search(open_warehouse(db)?, arguments).map(ok),
-        Command::Mcp => {
+        Command::Mcp { read_only } => {
             let warehouse = open_warehouse(db)?;
             let runtime = tokio::runtime::Runtime::new()?;
             runtime
-                .block_on(githubdw::mcp::serve_stdio(warehouse))
+                .block_on(githubdw::mcp::serve_stdio(warehouse, read_only))
                 .map(ok)
         }
     }
