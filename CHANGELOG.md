@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still runs every source even after one fails, and prints a one-line
   summary of failures to stderr. Exit 1 is unchanged for errors that stop the
   run before any work happens (missing `gh`, lock held, bad arguments).
+- Review counts exclude pending and dismissed reviews, so numbers change.
+  Every review metric and leaderboard (`reviews_given`, `reviews_received`,
+  `total_reviews`, `top_reviewers`, `top_reviewed_authors`) now counts only
+  APPROVED, CHANGES_REQUESTED and COMMENTED reviews. PENDING (an unsubmitted
+  draft) and DISMISSED (withdrawn by a maintainer) no longer count.
 
 ### Fixed
 
