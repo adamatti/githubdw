@@ -50,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because an issue comment's `parent_key` is a node id, not an `owner/repo#n`
   key). The filter also lowercases its own input once, since `repo_key` is
   always stored lowercased.
+- `pull_requests()` paging is now stable: results are ordered by
+  `created_at DESC, pr_key DESC`, so pull requests that share the same
+  `created_at` (common with bulk imports or bots) no longer repeat or vanish
+  across pages. The reviewer, label, and org filters now use `EXISTS`
+  subqueries instead of one-to-many `JOIN`s, so the `DISTINCT` that masked
+  this (and forced a temp B-tree) is gone; counts and filtered results are
+  unchanged.
 
 ## [0.5.1] - 2026-11-13
 
