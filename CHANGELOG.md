@@ -58,6 +58,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this (and forced a temp B-tree) is gone; counts and filtered results are
   unchanged.
 
+## [0.5.2] - 2026-11-16
+
+### Added
+
+- A read index, `idx_pr_state_draft_comments` on `fact_pull_requests(state,
+  is_draft, comment_count)`, created on open like the collection tables. A
+  listing that orders every pull request by comment count, or by state and
+  draft, now reads this small index instead of every full row: on a 17 GB
+  warehouse with 49k pull requests, 37.7 s cold before and 0.12 s after. It
+  is additive only: `PRAGMA user_version` stays at 8, so older binaries still
+  open an upgraded warehouse.
+
 ## [0.5.1] - 2026-11-13
 
 ### Fixed

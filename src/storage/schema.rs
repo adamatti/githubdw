@@ -48,6 +48,15 @@ pub fn init(conn: &mut Connection) -> Result<()> {
         assert_referential_integrity(conn)?;
     }
     ensure_collection_tables(conn)?;
+    ensure_sort_indexes(conn)?;
+    Ok(())
+}
+
+/// Create the sort read indexes when missing. Not a numbered migration, for
+/// the same reason as [`ensure_collection_tables`]: older binaries still open
+/// the warehouse, and the statements only add indexes.
+pub fn ensure_sort_indexes(conn: &Connection) -> Result<()> {
+    conn.execute_batch(include_str!("sort_indexes.sql"))?;
     Ok(())
 }
 
@@ -118,6 +127,36 @@ mod tests {
             )
             .expect("count tables");
         assert_eq!(count, 24, "all base tables should exist");
+    }
+
+    #[test]
+    fn sort_index_is_additive_and_keeps_the_version() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory db");
+        init(&mut conn).expect("first init");
+        init(&mut conn).expect("second init");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_pr_state_draft_comments'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count index");
+        assert_eq!(n, 1);
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version");
+        assert_eq!(version, 8, "an older githubdw still opens the warehouse");
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT rowid, comment_count FROM fact_pull_requests ORDER BY comment_count DESC",
+                [],
+                |row| row.get(3),
+            )
+            .expect("plan");
+        assert!(
+            plan.contains("COVERING INDEX idx_pr_state_draft_comments"),
+            "{plan}"
+        );
     }
 
     #[test]
