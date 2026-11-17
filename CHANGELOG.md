@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-16
+
 ### Added
 
 - A read index, `idx_pr_state_draft_comments` on `fact_pull_requests(state,
