@@ -37,6 +37,9 @@ fn run(command_line: CommandLine) -> githubdw::Result<ExitCode> {
         Command::Monitor { command } => admin::monitor(open_warehouse(db)?, command).map(ok),
         Command::Group { command } => admin::group(open_warehouse(db)?, command).map(ok),
         Command::Sync { command } => sync::run(db, command),
+        Command::Diffs {
+            command: cli::DiffsCommand::Purge { dry_run, vacuum },
+        } => admin::purge_diffs(open_warehouse(db)?, dry_run, vacuum).map(ok),
         Command::Query(arguments) => report::query(open_warehouse(db)?, *arguments).map(ok),
         Command::Metrics { command } => report::metrics(open_warehouse(db)?, command).map(ok),
         Command::Search(arguments) => report::search(open_warehouse(db)?, arguments).map(ok),

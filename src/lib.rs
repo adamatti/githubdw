@@ -20,6 +20,7 @@ pub mod groups;
 pub mod mcp;
 pub mod metrics;
 pub mod period;
+pub mod purge;
 pub mod query;
 pub mod refresh;
 pub mod retention;

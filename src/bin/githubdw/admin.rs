@@ -115,3 +115,24 @@ pub fn group(warehouse: GithubDW, command: GroupCommand) -> githubdw::Result<()>
     }
     Ok(())
 }
+
+/// `githubdw diffs purge`: clear stored patch text, keeping rows and counts.
+pub fn purge_diffs(warehouse: GithubDW, dry_run: bool, vacuum: bool) -> githubdw::Result<()> {
+    let report = if dry_run {
+        warehouse.purge_stored_diffs_dry_run()?
+    } else {
+        warehouse.purge_stored_diffs(vacuum)?
+    };
+    let verb = if dry_run { "Would clear" } else { "Cleared" };
+    println!(
+        "{verb} patch text on {} file rows ({} bytes); rows and line counts kept.",
+        report.rows_cleared, report.bytes_cleared
+    );
+    if report.vacuumed {
+        println!(
+            "Vacuumed: {} -> {} bytes.",
+            report.file_bytes_before, report.file_bytes_after
+        );
+    }
+    Ok(())
+}

@@ -50,12 +50,31 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Manage stored diff (patch) text
+    Diffs {
+        #[command(subcommand)]
+        command: DiffsCommand,
+    },
     /// Run the MCP (Model Context Protocol) stdio server
     Mcp {
         /// Hide trigger_sync and refuse monitor writes (add/remove); list
         /// actions and read tools stay available
         #[arg(long)]
         read_only: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DiffsCommand {
+    /// Clear stored patch text. Keeps every file row with its path, change
+    /// type and line counts. Refuses while a sync holds a lock.
+    Purge {
+        /// Print the rows and bytes that would be cleared; write nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Run VACUUM afterwards to return the space to the file system
+        #[arg(long)]
+        vacuum: bool,
     },
 }
 
