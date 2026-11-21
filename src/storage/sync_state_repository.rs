@@ -28,20 +28,21 @@ pub fn acquire_owned_lock(conn: &Connection, entity_key: &str) -> Result<String>
 }
 
 fn take_lock(conn: &Connection, entity_key: &str, owner: Option<&str>) -> Result<String> {
-    let existing: Option<String> = conn
+    let existing: Option<(String, Option<i64>)> = conn
         .query_row(
-            "SELECT started_at FROM sync_locks WHERE entity_key = ?1",
+            "SELECT started_at, holder_pid FROM sync_locks WHERE entity_key = ?1",
             [entity_key],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    if let Some(started_at) = existing {
+    if let Some((started_at, holder)) = existing {
         // A value nobody can date is a crashed or hand-edited lock; waiting
-        // for it to "age" would block the entity forever.
+        // for it to "age" would block the entity forever. A lock whose holder
+        // process is gone (killed by a timeout, crashed) is free at once.
         let started = started_at
             .parse::<DateTime<Utc>>()
             .unwrap_or(DateTime::UNIX_EPOCH);
-        if Utc::now() - started < Duration::minutes(STALE_LOCK_MINUTES) {
+        if Utc::now() - started < Duration::minutes(STALE_LOCK_MINUTES) && !holder_gone(holder) {
             return Err(Error::SyncInProgress(entity_key.to_string()));
         }
         conn.execute(
@@ -51,8 +52,9 @@ fn take_lock(conn: &Connection, entity_key: &str, owner: Option<&str>) -> Result
     }
     let token = lease_token(None);
     match conn.execute(
-        "INSERT INTO sync_locks (entity_key, started_at, chunk_start_date) VALUES (?1, ?2, ?3)",
-        params![entity_key, token, owner],
+        "INSERT INTO sync_locks (entity_key, started_at, chunk_start_date, holder_pid)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![entity_key, token, owner, std::process::id()],
     ) {
         Ok(_) => Ok(token),
         Err(rusqlite::Error::SqliteFailure(failure, _))
@@ -62,6 +64,39 @@ fn take_lock(conn: &Connection, entity_key: &str, owner: Option<&str>) -> Result
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// True when `pid` names a process that no longer exists on this machine.
+/// Rows from older binaries carry no pid and are judged by age alone; a pid
+/// this check cannot see counts as alive.
+fn holder_gone(pid: Option<i64>) -> bool {
+    pid.and_then(|p| u32::try_from(p).ok())
+        .is_some_and(|p| !process_alive(p))
+}
+
+pub(crate) fn process_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(true)
+    }
+}
+
+/// Delete every lock process `pid` holds. For a signal handler, so a run
+/// stopped by SIGTERM or Ctrl-C leaves no lock behind.
+pub fn release_locks_held_by(conn: &Connection, pid: u32) -> Result<usize> {
+    Ok(conn.execute("DELETE FROM sync_locks WHERE holder_pid = ?1", [pid])?)
 }
 
 /// Renew an owned lease. Returns the new token, or `None` when the lock is no
@@ -560,22 +595,31 @@ pub fn active_syncs(conn: &Connection) -> Result<Vec<ActiveSync>> {
         // The lock's own started_at is renewed as the sync progresses; the job
         // row keeps the real start.
         "SELECT l.entity_key, COALESCE(j.started_at, l.started_at), l.current_item,
-                l.current_item_id, l.synced, l.skipped, l.failed
+                l.current_item_id, l.synced, l.skipped, l.failed, l.holder_pid
          FROM sync_locks l LEFT JOIN sync_jobs j ON j.entity_key = l.entity_key
          ORDER BY 2",
     )?;
     let rows = statement.query_map([], |row| {
-        Ok(ActiveSync {
-            entity_key: row.get(0)?,
-            started_at: row.get(1)?,
-            current_item: row.get(2)?,
-            current_item_id: row.get(3)?,
-            synced: row.get(4)?,
-            skipped: row.get(5)?,
-            failed: row.get(6)?,
-        })
+        Ok((
+            ActiveSync {
+                entity_key: row.get(0)?,
+                started_at: row.get(1)?,
+                current_item: row.get(2)?,
+                current_item_id: row.get(3)?,
+                synced: row.get(4)?,
+                skipped: row.get(5)?,
+                failed: row.get(6)?,
+            },
+            row.get::<_, Option<i64>>(7)?,
+        ))
     })?;
-    Ok(rows.collect::<std::result::Result<_, _>>()?)
+    // A killed run's leftover row is not a sync in progress.
+    Ok(rows
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|(_, holder)| !holder_gone(*holder))
+        .map(|(sync, _)| sync)
+        .collect())
 }
 
 /// The most recent `limit` sync jobs, newest first.
@@ -962,5 +1006,46 @@ mod tests {
         assert_eq!(jobs[0].entity_key, "repo:o/r");
         assert_eq!(jobs[0].synced, 3);
         assert!(jobs[0].completed_at.is_some());
+    }
+
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[test]
+    fn a_lock_whose_holder_process_is_gone_is_free_at_once() {
+        let warehouse = GithubDW::open_in_memory().unwrap();
+        let conn = warehouse.connection();
+        acquire_owned_lock(conn, "user:alice").unwrap();
+        assert!(
+            acquire_owned_lock(conn, "user:alice").is_err(),
+            "live holder"
+        );
+        assert_eq!(active_syncs(conn).unwrap().len(), 1);
+        conn.execute("UPDATE sync_locks SET holder_pid = ?1", [dead_pid()])
+            .unwrap();
+        assert!(
+            active_syncs(conn).unwrap().is_empty(),
+            "a dead run is not active"
+        );
+        acquire_owned_lock(conn, "user:alice").expect("taken over at once");
+    }
+
+    #[test]
+    fn release_locks_held_by_removes_only_that_process_rows() {
+        let warehouse = GithubDW::open_in_memory().unwrap();
+        let conn = warehouse.connection();
+        acquire_owned_lock(conn, "user:alice").unwrap();
+        acquire_owned_lock(conn, "user:bob").unwrap();
+        conn.execute(
+            "UPDATE sync_locks SET holder_pid = 1 WHERE entity_key = 'user:bob'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(release_locks_held_by(conn, std::process::id()).unwrap(), 1);
+        assert_eq!(active_syncs(conn).unwrap().len(), 1);
     }
 }

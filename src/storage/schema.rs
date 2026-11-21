@@ -49,7 +49,31 @@ pub fn init(conn: &mut Connection) -> Result<()> {
     }
     ensure_collection_tables(conn)?;
     ensure_sort_indexes(conn)?;
+    ensure_lock_holder_column(conn)?;
     Ok(())
+}
+
+/// `sync_locks.holder_pid`: the process holding each lock, so a lock left by
+/// a killed run is free at once. Additive and outside the numbered
+/// migrations for the same reason as [`ensure_collection_tables`]: older
+/// binaries never name the column and still open the warehouse.
+pub fn ensure_lock_holder_column(conn: &Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sync_locks') WHERE name = 'holder_pid')",
+        [],
+        |r| r.get(0),
+    )?;
+    if exists {
+        return Ok(());
+    }
+    match conn.execute_batch("ALTER TABLE sync_locks ADD COLUMN holder_pid INTEGER") {
+        Ok(()) => Ok(()),
+        // Another process added it between the check and the ALTER.
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column") => {
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Create the sort read indexes when missing. Not a numbered migration, for

@@ -17,10 +17,51 @@ use cli::{Command, CommandLine};
 use githubdw::GithubDW;
 
 fn open_warehouse(db: Option<PathBuf>) -> githubdw::Result<GithubDW> {
-    match db {
+    let warehouse = match db {
         Some(path) => GithubDW::open(path),
         None => GithubDW::open_default(),
-    }
+    }?;
+    release_locks_on_signal(warehouse.database_path().to_path_buf());
+    Ok(warehouse)
+}
+
+/// On SIGTERM, SIGINT or SIGHUP (a systemd timeout, Ctrl-C, a closed
+/// terminal), delete the sync locks this process holds, then exit with
+/// 128 + the signal number. Without it a killed run leaves its lock rows
+/// behind and blocks those entities until the rows age out. Started once.
+fn release_locks_on_signal(path: PathBuf) {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            let code = runtime.block_on(async {
+                use tokio::signal::unix::{SignalKind, signal};
+                let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
+                    signal(SignalKind::terminate()),
+                    signal(SignalKind::interrupt()),
+                    signal(SignalKind::hangup()),
+                ) else {
+                    return None;
+                };
+                Some(tokio::select! {
+                    _ = term.recv() => 143,
+                    _ = int.recv() => 130,
+                    _ = hup.recv() => 129,
+                })
+            });
+            let Some(code) = code else { return };
+            match GithubDW::release_locks_held_by(&path, std::process::id()) {
+                Ok(n) => eprintln!("stopped by signal; released {n} sync lock(s)"),
+                Err(e) => eprintln!("stopped by signal; could not release sync locks: {e}"),
+            }
+            std::process::exit(code);
+        });
+    });
 }
 
 /// Exit code for "the run finished, but some source or item in it failed".

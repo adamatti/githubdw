@@ -23,7 +23,7 @@ dirs = "6.0"
 # mirrored crates.io registries, which can lag upstream by weeks. The MCP tool
 # contract is identical; see src/mcp/mod.rs for the hand-written tool router.
 rmcp = { version = "0.12", features = ["server", "transport-io"] }
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal"] }
 schemars = "1.2.1"
 # Content digests for diff revision fingerprints (no diff text is stored).
 sha2 = "0.10"

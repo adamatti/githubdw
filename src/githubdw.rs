@@ -74,6 +74,15 @@ impl GithubDW {
     }
 
     /// Path of the open database file.
+    /// Delete every sync lock process `pid` holds in the warehouse at `path`,
+    /// on a fresh connection and without migrating. For a CLI's signal
+    /// handler, so a run stopped by SIGTERM or Ctrl-C leaves no lock behind.
+    pub fn release_locks_held_by(path: impl AsRef<Path>, pid: u32) -> Result<usize> {
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        crate::storage::sync_state_repository::release_locks_held_by(&conn, pid)
+    }
+
     pub fn database_path(&self) -> &Path {
         &self.database_path
     }
