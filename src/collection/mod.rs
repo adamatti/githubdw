@@ -1220,40 +1220,24 @@ pub struct LiveDiff {
     pub fingerprint: String,
 }
 
-const REVISION_QUERY: &str = r#"
-query($owner: String!, $name: String!, $number: Int!) {
-  rateLimit { limit cost remaining resetAt }
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) { baseRefOid headRefOid }
-  }
-}
-"#;
-
+/// The pull request's base and head commits, from REST `pulls/{n}`. Live
+/// diffs use REST only, so a GraphQL-heavy backfill that has spent the
+/// GraphQL quota cannot make an on-demand diff fail.
 fn revision_pair(client: &mut GhClient, repository: &str, number: i64) -> Result<(String, String)> {
-    let (owner, name) = repository
-        .split_once('/')
-        .ok_or_else(|| Error::InvalidArgument(format!("expected owner/name, got {repository}")))?;
-    let number_text = number.to_string();
-    let data = client.graphql(
-        REVISION_QUERY,
-        &[
-            ("owner", owner),
-            ("name", name),
-            ("number", number_text.as_str()),
-        ],
-    )?;
-    let pull = data
-        .get("repository")
-        .and_then(|r| r.get("pullRequest"))
-        .filter(|p| !p.is_null())
-        .ok_or_else(|| Error::NotFound(format!("{repository}#{number}")))?;
-    let field = |name: &str| {
-        pull.get(name)
+    if repository.split_once('/').is_none() {
+        return Err(Error::InvalidArgument(format!(
+            "expected owner/name, got {repository}"
+        )));
+    }
+    let pull = client.rest(&format!("repos/{repository}/pulls/{number}"))?;
+    let sha = |side: &str| {
+        pull.get(side)
+            .and_then(|s| s.get("sha"))
             .and_then(Value::as_str)
             .map(str::to_string)
-            .ok_or_else(|| Error::GitHubApi(format!("{repository}#{number} has no {name}")))
+            .ok_or_else(|| Error::GitHubApi(format!("{repository}#{number} has no {side}.sha")))
     };
-    Ok((field("baseRefOid")?, field("headRefOid")?))
+    Ok((sha("base")?, sha("head")?))
 }
 
 /// Fetch a pull request's diff into memory. Never written to SQLite, logs,

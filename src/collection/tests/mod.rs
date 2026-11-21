@@ -1183,9 +1183,24 @@ fn a_live_diff_is_returned_in_memory_and_written_nowhere() {
     )
     .unwrap();
     let before = snapshot(conn);
+    let asked = github.requests();
     let diff =
         fetch_pull_request_diff_live(&mut client, "acme/app", 2, &CollectionControl::default())
             .unwrap();
+    let now = github.requests();
+    let graphql = |r: &fake::Requests| {
+        r.light_searches + r.detailed_searches + r.single_pr + r.revision + r.review_pages + r.other
+    };
+    assert_eq!(
+        graphql(&now),
+        graphql(&asked),
+        "a live diff spends no GraphQL quota"
+    );
+    assert_eq!(
+        now.rest_pulls - asked.rest_pulls,
+        2,
+        "revision pair read before and after, by REST"
+    );
     assert!(
         diff.files[0]
             .patch

@@ -121,6 +121,8 @@ pub struct Requests {
     pub single_pr: usize,
     pub revision: usize,
     pub rest_files: usize,
+    /// REST `pulls/<n>` reads (the live diff's revision pair).
+    pub rest_pulls: usize,
     pub review_pages: usize,
     pub other: usize,
     pub queries: Vec<String>,
@@ -423,12 +425,26 @@ impl GhTransport for FakeGitHub {
             .unwrap_or_default()
             .to_string();
         if arguments.get(1).map(String::as_str) != Some("graphql") {
-            // REST: repos/<o>/<n>/pulls/<num>/files?per_page=100&page=P
+            // REST: repos/<o>/<n>/pulls/<num>/files?per_page=100&page=P, or
+            // repos/<o>/<n>/pulls/<num> for the revision pair.
             let path = arguments.get(1).cloned().unwrap_or_default();
-            world.requests.rest_files += 1;
             world.requests.queries.push(path.clone());
             let parts: Vec<&str> = path.split(['/', '?']).collect();
             let number: i64 = parts[4].parse().unwrap();
+            if parts.get(5).is_none() {
+                world.requests.rest_pulls += 1;
+                return Ok(match world.find(parts[1], parts[2], number) {
+                    Some(pr) => json!({"base": {"sha": pr.base_oid}, "head": {"sha": pr.head_oid}})
+                        .to_string(),
+                    None => {
+                        return Err(Error::GhCommand {
+                            exit_code: Some(1),
+                            stderr: "HTTP 404: Not Found".into(),
+                        });
+                    }
+                });
+            }
+            world.requests.rest_files += 1;
             let page: usize = path.rsplit("page=").next().unwrap().parse().unwrap();
             let files: Vec<Value> = world
                 .find(parts[1], parts[2], number)
