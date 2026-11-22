@@ -33,9 +33,15 @@ const GH_TIMEOUT: Duration = Duration::from_secs(120);
 pub const GH_DEADLINE_ENV: &str = "GITHUBDW_GH_DEADLINE_SECS";
 /// Set to a non-empty value to log each `gh` request's operation and timing.
 pub const GH_CALL_LOG_ENV: &str = "GITHUBDW_LOG_GH_CALLS";
+/// Set to a non-empty value to include GraphQL query text in request logs.
+pub const GH_QUERY_LOG_ENV: &str = "GITHUBDW_LOG_GH_QUERIES";
 
 fn gh_call_logging_enabled() -> bool {
     std::env::var_os(GH_CALL_LOG_ENV).is_some_and(|value| !value.is_empty())
+}
+
+fn gh_query_logging_enabled() -> bool {
+    std::env::var_os(GH_QUERY_LOG_ENV).is_some_and(|value| !value.is_empty())
 }
 
 /// A safe operation label: never include GraphQL query text or variables.
@@ -719,7 +725,9 @@ impl GhClient {
                     gh_operation(arguments),
                     attempt + 1
                 );
-                if let Some(query) = graphql_query(arguments) {
+                if gh_query_logging_enabled()
+                    && let Some(query) = graphql_query(arguments)
+                {
                     eprintln!("githubdw: GraphQL query:\n{query}");
                 }
             }
