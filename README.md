@@ -239,6 +239,10 @@ Everything goes through the `gh` CLI, so GitHub Enterprise works by pointing
 GH_HOST=github.example.com githubdw sync repo owner/name
 ```
 
+Set `GITHUBDW_LOG_GH_CALLS=1` to log GitHub CLI request operations, attempts,
+durations, response sizes, and failures to stderr. GraphQL query text is
+included; query variables are omitted.
+
 ## Configuration
 
 ```bash

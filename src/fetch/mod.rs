@@ -31,6 +31,38 @@ pub trait GhTransport: Send + Sync {
 const GH_TIMEOUT: Duration = Duration::from_secs(120);
 /// Environment variable overriding the 120-second `gh` deadline, in whole seconds.
 pub const GH_DEADLINE_ENV: &str = "GITHUBDW_GH_DEADLINE_SECS";
+/// Set to a non-empty value to log each `gh` request's operation and timing.
+pub const GH_CALL_LOG_ENV: &str = "GITHUBDW_LOG_GH_CALLS";
+
+fn gh_call_logging_enabled() -> bool {
+    std::env::var_os(GH_CALL_LOG_ENV).is_some_and(|value| !value.is_empty())
+}
+
+/// A safe operation label: never include GraphQL query text or variables.
+fn gh_operation(arguments: &[String]) -> String {
+    match arguments.get(1).map(String::as_str) {
+        Some("graphql") => "gh api graphql".into(),
+        Some("api") => format!(
+            "gh api {}",
+            arguments
+                .get(2)
+                .and_then(|path| path.split('?').next())
+                .unwrap_or_default()
+        ),
+        Some(command) => format!("gh {command}"),
+        None => "gh".into(),
+    }
+}
+
+fn graphql_query(arguments: &[String]) -> Option<&str> {
+    arguments.windows(2).find_map(|pair| {
+        if pair[0] == "-f" {
+            pair[1].strip_prefix("query=")
+        } else {
+            None
+        }
+    })
+}
 
 /// Real transport: shells out to the `gh` binary on PATH.
 pub struct GhCommandLine {
@@ -469,10 +501,27 @@ impl GhClient {
 
     /// Verify `gh` is installed and authenticated. Call once at startup.
     pub fn preflight(&self) -> Result<()> {
+        let started = Instant::now();
+        if gh_call_logging_enabled() {
+            eprintln!("githubdw: GH request start: gh auth status");
+        }
         self.transport
             .run(&["auth".into(), "status".into()])
-            .map(|_| ())
+            .map(|_| {
+                if gh_call_logging_enabled() {
+                    eprintln!(
+                        "githubdw: GH request complete: gh auth status ({:.3}s)",
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+            })
             .map_err(|error| {
+                if gh_call_logging_enabled() {
+                    eprintln!(
+                        "githubdw: GH request failed: gh auth status ({:.3}s): {error}",
+                        started.elapsed().as_secs_f64()
+                    );
+                }
                 Error::GhUnavailable(format!(
                     "`gh auth status` failed — install the GitHub CLI and run `gh auth login` \
                      (set GH_HOST for GitHub Enterprise): {error}"
@@ -663,9 +712,29 @@ impl GhClient {
                 self.request_allowance = Some(allowance - 1);
             }
             self.requests_issued += 1;
+            let started = Instant::now();
+            if gh_call_logging_enabled() {
+                eprintln!(
+                    "githubdw: GH request start: {} (attempt {})",
+                    gh_operation(arguments),
+                    attempt + 1
+                );
+                if let Some(query) = graphql_query(arguments) {
+                    eprintln!("githubdw: GraphQL query:\n{query}");
+                }
+            }
             match self.transport.run(sent) {
                 Ok(stdout) => {
                     self.bytes_received += stdout.len() as u64;
+                    if gh_call_logging_enabled() {
+                        eprintln!(
+                            "githubdw: GH request complete: {} (attempt {}, {:.3}s, {} bytes)",
+                            gh_operation(arguments),
+                            attempt + 1,
+                            started.elapsed().as_secs_f64(),
+                            stdout.len()
+                        );
+                    }
                     let Some(guard) = &mut self.quota_guard else {
                         return serde_json::from_str(&stdout).map_err(Error::from);
                     };
@@ -687,6 +756,14 @@ impl GhClient {
                     return serde_json::from_str(body).map_err(Error::from);
                 }
                 Err(error) => {
+                    if gh_call_logging_enabled() {
+                        eprintln!(
+                            "githubdw: GH request failed: {} (attempt {}, {:.3}s): {error}",
+                            gh_operation(arguments),
+                            attempt + 1,
+                            started.elapsed().as_secs_f64()
+                        );
+                    }
                     attempt += 1;
                     if probe || attempt >= RETRY_ATTEMPTS || !is_retryable(&error) {
                         return Err(error);
