@@ -163,11 +163,12 @@ fn sync_repo_exits_nonzero_when_one_item_fails() {
 }
 
 #[test]
-fn sync_all_exits_one_when_gh_is_unauthenticated() {
+fn sync_all_reports_partial_failure_when_gh_is_unauthenticated() {
     let cli = Cli::new();
     cli.run(&["monitor", "add-repo", REPO]).ok();
     cli.fail_auth();
-    cli.run(&["sync", "all"]).code(1);
+    let run = cli.run(&["sync", "all"]).code(3);
+    assert!(run.stderr.contains("gh auth login"), "{}", run.stderr);
 }
 
 #[test]
