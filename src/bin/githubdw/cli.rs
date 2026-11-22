@@ -160,6 +160,9 @@ pub enum SyncCommand {
         /// Skip fetching per-file patch text (fast mode)
         #[arg(long)]
         skip_diffs: bool,
+        /// Skip fetching changed-file details; existing file rows are left untouched
+        #[arg(long)]
+        skip_files: bool,
         /// Sync only pull requests
         #[arg(long)]
         pull_requests_only: bool,
@@ -177,6 +180,10 @@ pub enum SyncCommand {
         /// Skip fetching per-file patch text (fast mode)
         #[arg(long)]
         skip_diffs: bool,
+        /// Skip fetching changed-file details (the aggregate changed-file count is retained).
+        /// Existing file rows in the warehouse are left untouched.
+        #[arg(long)]
+        skip_files: bool,
     },
     /// Re-fetch exact pull requests and issues (1-64) through the normal
     /// hydrate/store path. Never moves cursors or coverage, never enrolls
@@ -193,6 +200,9 @@ pub enum SyncCommand {
         /// Skip fetching per-file patch text (fast mode)
         #[arg(long)]
         skip_diffs: bool,
+        /// Skip fetching changed-file details; existing file rows are left untouched
+        #[arg(long)]
+        skip_files: bool,
         /// Emit the per-target report as JSON
         #[arg(long)]
         json: bool,
