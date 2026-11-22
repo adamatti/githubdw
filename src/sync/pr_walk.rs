@@ -73,6 +73,58 @@ pub(super) fn recovery_allowed(decision: &crate::retention::GateDecision) -> boo
 }
 
 impl Syncer<'_> {
+    /// Hydrate a page's PRs concurrently when the transport supports it.
+    /// Returns `None` for fixture or budgeted clients, which retain the
+    /// original sequential request path.
+    pub(super) fn hydrate_pull_requests_parallel(
+        &self,
+        pull_requests: &[PullRequestData],
+    ) -> Option<Vec<Result<(PullRequestData, Option<String>)>>> {
+        if pull_requests.len() < 2 {
+            return None;
+        }
+        let worker_count = pull_requests.len().min(self.pr_hydration_jobs);
+        if worker_count < 2 {
+            return None;
+        }
+        let mut clients = (0..worker_count)
+            .map(|_| self.client.parallel_worker())
+            .collect::<Option<Vec<_>>>()?;
+        let chunk_size = pull_requests.len().div_ceil(worker_count);
+
+        Some(std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(worker_count);
+            for (client, chunk) in clients.drain(..).zip(pull_requests.chunks(chunk_size)) {
+                let pull_requests = chunk.to_vec();
+                handles.push((
+                    pull_requests.len(),
+                    scope.spawn(move || {
+                        let mut client = client;
+                        pull_requests
+                            .into_iter()
+                            .map(|mut pull_request| {
+                                pull_requests::hydrate_pull_request(&mut client, &mut pull_request)
+                                    .map(|note| (pull_request, note))
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                ));
+            }
+            let mut results = Vec::with_capacity(pull_requests.len());
+            for (chunk_len, handle) in handles {
+                match handle.join() {
+                    Ok(chunk_results) => results.extend(chunk_results),
+                    Err(_) => results.extend((0..chunk_len).map(|_| {
+                        Err(crate::Error::GitHubApi(
+                            "pull request hydration worker panicked".into(),
+                        ))
+                    })),
+                }
+            }
+            results
+        }))
+    }
+
     /// Walk a repository's pull requests newest-first, resumably.
     ///
     /// The walk is checkpointed after every fully processed page, so a run
@@ -191,6 +243,19 @@ impl Syncer<'_> {
             )?;
 
             let page_is_empty = page.pull_requests.is_empty();
+            let mut items_to_hydrate = Vec::new();
+            for pull_request in &page.pull_requests {
+                if let (Some(cursor), Some(updated)) =
+                    (updated_cursor, pull_request.updated_at.as_deref())
+                    && updated < cursor
+                {
+                    break;
+                }
+                items_to_hydrate.push(pull_request.clone());
+            }
+            let mut hydrated = self
+                .hydrate_pull_requests_parallel(&items_to_hydrate)
+                .map(Vec::into_iter);
             for pull_request in &page.pull_requests {
                 // Incremental stop: results are updated-desc, so once an item
                 // is *strictly* older than the cursor everything after it is
@@ -215,15 +280,32 @@ impl Syncer<'_> {
                 item_index += 1;
                 processed_this_run += 1;
                 let pr_key = format!("{repo_key}#{}", pull_request.number);
-                match self.upsert_one_pull_request(
-                    &repo_key,
-                    &pr_key,
-                    pull_request,
-                    timezone,
-                    core_hours,
-                    &bot_suffix,
-                    options,
-                ) {
+                let outcome = if let Some(hydrated) = &mut hydrated {
+                    match hydrated.next().expect("every eligible PR was hydrated") {
+                        Ok((pull_request, note)) => self.upsert_hydrated_pull_request(
+                            &repo_key,
+                            &pr_key,
+                            pull_request,
+                            note,
+                            timezone,
+                            core_hours,
+                            &bot_suffix,
+                            options,
+                        ),
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    self.upsert_one_pull_request(
+                        &repo_key,
+                        &pr_key,
+                        pull_request,
+                        timezone,
+                        core_hours,
+                        &bot_suffix,
+                        options,
+                    )
+                };
+                match outcome {
                     Ok(note) => {
                         summary.notes.extend(note);
                         summary.pull_requests_synced += 1;
@@ -325,6 +407,30 @@ impl Syncer<'_> {
     ) -> Result<Option<String>> {
         let mut pull_request = pull_request.clone();
         let note = pull_requests::hydrate_pull_request(self.client, &mut pull_request)?;
+        self.upsert_hydrated_pull_request(
+            repo_key,
+            pr_key,
+            pull_request,
+            note,
+            timezone,
+            core_hours,
+            bot_suffix,
+            options,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn upsert_hydrated_pull_request(
+        &mut self,
+        repo_key: &str,
+        pr_key: &str,
+        pull_request: PullRequestData,
+        note: Option<String>,
+        timezone: chrono_tz::Tz,
+        core_hours: (u32, u32),
+        bot_suffix: &str,
+        options: &SyncOptions,
+    ) -> Result<Option<String>> {
         // Fetch patch text BEFORE any write, then land every write for this
         // item in one savepoint: a failure part-way (including a patch write)
         // leaves the previously stored rows exactly as they were.

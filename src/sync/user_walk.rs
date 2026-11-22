@@ -335,6 +335,19 @@ impl Syncer<'_> {
             note_inaccessible(login, role, &page, summary);
 
             let page_is_empty = page.items.is_empty() && page.inaccessible.is_empty();
+            let mut items_to_hydrate = Vec::new();
+            for item in &page.items {
+                if let (Some(cursor), Some(updated)) =
+                    (cursor_stop, item.pull_request.updated_at.as_deref())
+                    && updated < cursor
+                {
+                    break;
+                }
+                items_to_hydrate.push(item.pull_request.clone());
+            }
+            let mut hydrated = self
+                .hydrate_pull_requests_parallel(&items_to_hydrate)
+                .map(Vec::into_iter);
             for item in &page.items {
                 // Strict comparison, exactly as the repository walk does it: an
                 // item updated in the same second as the cursor may have missed
@@ -358,15 +371,32 @@ impl Syncer<'_> {
                     item.repository.created_at.as_deref(),
                 )?;
                 let pr_key = format!("{repo_key}#{}", item.pull_request.number);
-                match self.upsert_one_pull_request(
-                    &repo_key,
-                    &pr_key,
-                    &item.pull_request,
-                    timezone,
-                    core_hours,
-                    &bot_suffix,
-                    options,
-                ) {
+                let outcome = if let Some(hydrated) = &mut hydrated {
+                    match hydrated.next().expect("every eligible PR was hydrated") {
+                        Ok((pull_request, note)) => self.upsert_hydrated_pull_request(
+                            &repo_key,
+                            &pr_key,
+                            pull_request,
+                            note,
+                            timezone,
+                            core_hours,
+                            &bot_suffix,
+                            options,
+                        ),
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    self.upsert_one_pull_request(
+                        &repo_key,
+                        &pr_key,
+                        &item.pull_request,
+                        timezone,
+                        core_hours,
+                        &bot_suffix,
+                        options,
+                    )
+                };
+                match outcome {
                     Ok(note) => {
                         summary.notes.extend(note);
                         summary.pull_requests_synced += 1;

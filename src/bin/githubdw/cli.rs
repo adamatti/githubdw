@@ -263,7 +263,11 @@ pub enum SyncCommand {
         json: bool,
     },
     /// Sync every enabled monitored source
-    All,
+    All {
+        /// Maximum monitored sources to sync concurrently
+        #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u32).range(1..=16))]
+        jobs: u32,
+    },
     /// Watch live progress of a running sync
     Watch,
 }
