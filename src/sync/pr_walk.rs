@@ -6,6 +6,9 @@ use super::*;
 /// not run, `Some(Err(reason))` when it ran and could not prove a set.
 pub(super) type Recovery = Option<std::result::Result<RecoveredFileSet, String>>;
 
+/// A pull request after parallel hydration, with its optional coverage note.
+pub(super) type HydratedPullRequest = Result<(PullRequestData, Option<String>)>;
+
 /// Run git-backed recovery when the API listing cannot be trusted. All
 /// network and git work happens here, before any savepoint opens.
 pub(super) fn recover_files(
@@ -79,7 +82,7 @@ impl Syncer<'_> {
     pub(super) fn hydrate_pull_requests_parallel(
         &self,
         pull_requests: &[PullRequestData],
-    ) -> Option<Vec<Result<(PullRequestData, Option<String>)>>> {
+    ) -> Option<Vec<HydratedPullRequest>> {
         if pull_requests.len() < 2 {
             return None;
         }
