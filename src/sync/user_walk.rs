@@ -79,30 +79,66 @@ impl Syncer<'_> {
         }
         .min(coverage_end);
 
-        for role in UserRole::all() {
-            let cursor =
-                sync_state::last_updated_cursor(self.connection, role.cursor_source_type(), login)?;
-            let mut watermark = WalkWatermark::default();
-
-            // Incremental when there is both prior coverage and a watermark to
-            // stop on. Otherwise this is a backfill, and a backfill must be
-            // windowed: `sort:updated-desc` plus a watermark stop cannot reach
-            // an old PR whose `updated_at` already sits below the cursor.
-            let incremental = options.days.is_none() && coverage_before.is_some();
-            if incremental && cursor.is_some() {
-                self.walk_user_search(
-                    login,
-                    role,
-                    None,
-                    cursor.as_deref(),
-                    entity_key,
-                    options,
-                    &mut summary,
-                    &mut watermark,
-                    0,
-                )?;
-            } else {
-                for (start, end) in month_windows(window_start, coverage_end) {
+        // Incremental when there is both prior coverage and a watermark to
+        // stop on. Otherwise this is a backfill, and a backfill must be
+        // windowed: `sort:updated-desc` plus a watermark stop cannot reach an
+        // old PR whose `updated_at` already sits below the cursor.
+        let incremental = options.days.is_none() && coverage_before.is_some();
+        let roles = UserRole::all();
+        let mut watermarks = [WalkWatermark::default(), WalkWatermark::default()];
+        let mut cursors = Vec::with_capacity(roles.len());
+        for role in roles {
+            cursors.push(sync_state::last_updated_cursor(
+                self.connection,
+                role.cursor_source_type(),
+                login,
+            )?);
+        }
+        if incremental {
+            // Each role from its own watermark; a role with none yet walks
+            // the short window since the end of coverage.
+            for (index, role) in roles.into_iter().enumerate() {
+                if cursors[index].is_some() {
+                    self.walk_user_search(
+                        login,
+                        role,
+                        None,
+                        cursors[index].as_deref(),
+                        entity_key,
+                        options,
+                        &mut summary,
+                        &mut watermarks[index],
+                        0,
+                    )?;
+                } else {
+                    for (start, end) in month_windows(window_start, coverage_end) {
+                        self.walk_user_search(
+                            login,
+                            role,
+                            Some((start, end)),
+                            None,
+                            entity_key,
+                            options,
+                            &mut summary,
+                            &mut watermarks[index],
+                            0,
+                        )?;
+                    }
+                }
+            }
+        } else {
+            // Newest month first, each month recorded as covered once both
+            // roles finished it cleanly. A walk stopped part-way (a killed
+            // process, a timeout) keeps every month it finished, and the next
+            // run skips them; coverage only ever grows back from the present,
+            // so it never claims a month it skipped.
+            for (start, end) in month_windows(window_start, coverage_end).into_iter().rev() {
+                if sync_state::covers_as_of(self.connection, entity_key, start, end, self.now)? {
+                    continue;
+                }
+                let failed_before = summary.failed.len();
+                let synced_before = summary.pull_requests_synced;
+                for (index, role) in roles.into_iter().enumerate() {
                     self.walk_user_search(
                         login,
                         role,
@@ -111,18 +147,29 @@ impl Syncer<'_> {
                         entity_key,
                         options,
                         &mut summary,
-                        &mut watermark,
+                        &mut watermarks[index],
                         0,
                     )?;
                 }
+                if !summary.partial && summary.failed.len() == failed_before {
+                    sync_state::record_range_as_of(
+                        self.connection,
+                        entity_key,
+                        &start.format("%Y-%m-%d").to_string(),
+                        &end.format("%Y-%m-%d").to_string(),
+                        summary.pull_requests_synced - synced_before,
+                        self.now,
+                    )?;
+                }
             }
-
-            if !summary.partial {
+        }
+        if !summary.partial {
+            for (index, role) in roles.into_iter().enumerate() {
                 sync_state::advance_cursor(
                     self.connection,
                     role.cursor_source_type(),
                     login,
-                    watermark.committable().as_deref(),
+                    watermarks[index].committable().as_deref(),
                 )?;
             }
         }

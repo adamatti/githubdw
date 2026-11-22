@@ -265,3 +265,70 @@ fn month_windows_clip_both_ends() {
         ]
     );
 }
+
+/// A backfill stopped part-way keeps the months it finished: newest first,
+/// each recorded once both roles are done, and the next run skips them.
+#[test]
+fn a_stopped_user_backfill_keeps_finished_months_and_resumes() {
+    let warehouse = los_angeles_warehouse();
+    let conn = warehouse.connection();
+    let now = evening_instant(); // 2026-08-16 in Los Angeles
+    let day = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+    let empty = || Ok(search_response(0, vec![]));
+    let stop = crate::Error::RateLimited {
+        resource: "graphql".into(),
+        wake_at: chrono::DateTime::from_timestamp(4_000_000_000, 0).unwrap(),
+        reason: "spent".into(),
+    };
+
+    // August (author, reviewer), then July's first request fails.
+    let (mut client, _) = shared_client(vec![empty(), empty(), Err(stop)]);
+    Syncer::new(conn, &mut client)
+        .as_of(now)
+        .sync_user("octocat", &fast_user_options(Some(60)))
+        .expect_err("the run stops in July");
+    assert!(
+        sync_state::covers_as_of(
+            conn,
+            "user:octocat",
+            day("2026-08-01"),
+            day("2026-08-15"),
+            now
+        )
+        .unwrap(),
+        "August is kept"
+    );
+    assert!(
+        !sync_state::covers_as_of(
+            conn,
+            "user:octocat",
+            day("2026-07-01"),
+            day("2026-07-31"),
+            now
+        )
+        .unwrap()
+    );
+
+    // The rerun asks only for July and June (two roles each).
+    let (mut client, transport) = shared_client(vec![empty(), empty(), empty(), empty()]);
+    let summary = Syncer::new(conn, &mut client)
+        .as_of(now)
+        .sync_user("octocat", &fast_user_options(Some(60)))
+        .unwrap();
+    assert!(!summary.partial);
+    assert_eq!(
+        transport.calls.lock().unwrap().len(),
+        4,
+        "August is not walked again"
+    );
+    assert!(
+        sync_state::covers_as_of(
+            conn,
+            "user:octocat",
+            day("2026-06-17"),
+            day("2026-08-15"),
+            now
+        )
+        .unwrap()
+    );
+}

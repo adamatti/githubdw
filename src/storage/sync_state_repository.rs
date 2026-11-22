@@ -406,6 +406,20 @@ fn clamped_ranges(
     Ok(ranges)
 }
 
+/// True when one stored range (ends clamped as in [`coverage_extent_as_of`])
+/// contains all of `[start, end]`.
+pub fn covers_as_of(
+    conn: &Connection,
+    entity_key: &str,
+    start: NaiveDate,
+    end: NaiveDate,
+    instant: DateTime<Utc>,
+) -> Result<bool> {
+    Ok(clamped_ranges(conn, entity_key, instant)?
+        .iter()
+        .any(|(s, e)| *s <= start && end <= *e))
+}
+
 /// Uncovered `[start, end]` windows between coverage and `target_date`.
 /// No ranges at all -> empty result (caller picks the initial window).
 pub fn gaps(
