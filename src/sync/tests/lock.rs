@@ -39,6 +39,8 @@ fn a_failing_completion_record_releases_the_lock_and_is_reported() {
     let transport = FixtureTransport::new(vec![
         Ok(search_response(0, vec![])),
         Ok(search_response(0, vec![])),
+        // review-requested: nothing pending
+        Ok(search_response(0, vec![])),
     ]);
     let mut client = GhClient::with_transport(Box::new(transport)).without_sleeping();
     let error = Syncer::new(conn, &mut client)

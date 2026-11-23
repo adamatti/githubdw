@@ -538,7 +538,7 @@ pub fn advance_cursor(
 ///
 /// Checkpoints live in `sync_metadata` under their own `source_type`, so no
 /// schema change is needed and readers that select a specific source type
-/// (`repo`, `user`, `user_reviews`) never see them. The value is opaque to
+/// (`repo`, `user`, `user_reviews`, `user_review_requests`) never see them. The value is opaque to
 /// storage; the syncer owns its format and validates it on load.
 pub fn load_checkpoint(
     conn: &Connection,

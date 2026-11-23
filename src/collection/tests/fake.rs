@@ -190,6 +190,7 @@ fn seconds(text: &str) -> i64 {
 struct Filter {
     author: Option<String>,
     reviewer: Option<String>,
+    review_requested: bool,
     field: Option<(String, i64, i64)>,
 }
 
@@ -197,6 +198,7 @@ fn parse_filter(q: &str) -> Filter {
     let mut filter = Filter {
         author: None,
         reviewer: None,
+        review_requested: false,
         field: None,
     };
     for token in q.split_whitespace() {
@@ -204,6 +206,8 @@ fn parse_filter(q: &str) -> Filter {
             filter.author = Some(login.to_lowercase());
         } else if let Some(login) = token.strip_prefix("reviewed-by:") {
             filter.reviewer = Some(login.to_lowercase());
+        } else if token.starts_with("review-requested:") {
+            filter.review_requested = true;
         } else {
             for field in ["created", "merged", "updated"] {
                 if let Some(range) = token.strip_prefix(&format!("{field}:")) {
@@ -225,6 +229,10 @@ fn parse_filter(q: &str) -> Filter {
 }
 
 fn matches(pr: &FakePr, filter: &Filter) -> bool {
+    // Fake PRs carry no pending review requests.
+    if filter.review_requested {
+        return false;
+    }
     if let Some(author) = &filter.author
         && pr.author.to_lowercase() != *author
     {

@@ -134,6 +134,7 @@ fn user_incremental_success_covers_days_missed_between_runs() {
     let (mut client, _) = shared_client(vec![
         Ok(search_response(0, vec![])),
         Ok(search_response(0, vec![])),
+        Ok(search_response(0, vec![])),
     ]);
     let summary = Syncer::new(conn, &mut client)
         .as_of(now + Duration::days(3))
@@ -267,7 +268,7 @@ fn month_windows_clip_both_ends() {
 }
 
 /// A backfill stopped part-way keeps the months it finished: newest first,
-/// each recorded once both roles are done, and the next run skips them.
+/// each recorded once every role is done, and the next run skips them.
 #[test]
 fn a_stopped_user_backfill_keeps_finished_months_and_resumes() {
     let warehouse = los_angeles_warehouse();
@@ -281,8 +282,8 @@ fn a_stopped_user_backfill_keeps_finished_months_and_resumes() {
         reason: "spent".into(),
     };
 
-    // August (author, reviewer), then July's first request fails.
-    let (mut client, _) = shared_client(vec![empty(), empty(), Err(stop)]);
+    // August (author, reviewer, review-requested), then July's first request fails.
+    let (mut client, _) = shared_client(vec![empty(), empty(), empty(), Err(stop)]);
     Syncer::new(conn, &mut client)
         .as_of(now)
         .sync_user("octocat", &fast_user_options(Some(60)))
@@ -309,8 +310,8 @@ fn a_stopped_user_backfill_keeps_finished_months_and_resumes() {
         .unwrap()
     );
 
-    // The rerun asks only for July and June (two roles each).
-    let (mut client, transport) = shared_client(vec![empty(), empty(), empty(), empty()]);
+    // The rerun asks only for July and June (three roles each).
+    let (mut client, transport) = shared_client((0..6).map(|_| empty()).collect());
     let summary = Syncer::new(conn, &mut client)
         .as_of(now)
         .sync_user("octocat", &fast_user_options(Some(60)))
@@ -318,7 +319,7 @@ fn a_stopped_user_backfill_keeps_finished_months_and_resumes() {
     assert!(!summary.partial);
     assert_eq!(
         transport.calls.lock().unwrap().len(),
-        4,
+        6,
         "August is not walked again"
     );
     assert!(

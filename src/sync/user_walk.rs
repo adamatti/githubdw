@@ -85,7 +85,7 @@ impl Syncer<'_> {
         // old PR whose `updated_at` already sits below the cursor.
         let incremental = options.days.is_none() && coverage_before.is_some();
         let roles = UserRole::all();
-        let mut watermarks = [WalkWatermark::default(), WalkWatermark::default()];
+        let mut watermarks = roles.map(|_| WalkWatermark::default());
         let mut cursors = Vec::with_capacity(roles.len());
         for role in roles {
             cursors.push(sync_state::last_updated_cursor(
@@ -98,7 +98,9 @@ impl Syncer<'_> {
             // Each role from its own watermark; a role with none yet walks
             // the short window since the end of coverage.
             for (index, role) in roles.into_iter().enumerate() {
-                if cursors[index].is_some() {
+                // Pending review requests can predate coverage and the set is
+                // small, so a role added after coverage walks it unwindowed.
+                if cursors[index].is_some() || role == UserRole::ReviewRequested {
                     self.walk_user_search(
                         login,
                         role,
@@ -127,8 +129,8 @@ impl Syncer<'_> {
                 }
             }
         } else {
-            // Newest month first, each month recorded as covered once both
-            // roles finished it cleanly. A walk stopped part-way (a killed
+            // Newest month first, each month recorded as covered once every
+            // role finished it cleanly. A walk stopped part-way (a killed
             // process, a timeout) keeps every month it finished, and the next
             // run skips them; coverage only ever grows back from the present,
             // so it never claims a month it skipped.

@@ -37,6 +37,8 @@ pub enum UserRole {
     Author,
     /// PRs the user reviewed (`reviewed-by:`).
     Reviewer,
+    /// PRs waiting on the user's review (`review-requested:`).
+    ReviewRequested,
 }
 
 impl UserRole {
@@ -45,24 +47,30 @@ impl UserRole {
         match self {
             UserRole::Author => "author",
             UserRole::Reviewer => "reviewed-by",
+            UserRole::ReviewRequested => "review-requested",
         }
     }
 
     /// The `sync_metadata.source_type` this role's cursor is stored under.
     ///
-    /// The two roles walk disjoint result sets, so folding them into one
+    /// The roles walk disjoint result sets, so folding them into one
     /// watermark would let the faster-moving side advance the cursor past
     /// unfetched items on the slower one.
     pub fn cursor_source_type(self) -> &'static str {
         match self {
             UserRole::Author => "user",
             UserRole::Reviewer => "user_reviews",
+            UserRole::ReviewRequested => "user_review_requests",
         }
     }
 
     /// Every role a user sync covers.
-    pub fn all() -> [UserRole; 2] {
-        [UserRole::Author, UserRole::Reviewer]
+    pub fn all() -> [UserRole; 3] {
+        [
+            UserRole::Author,
+            UserRole::Reviewer,
+            UserRole::ReviewRequested,
+        ]
     }
 }
 
@@ -278,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_expressions_for_both_roles() {
+    fn builds_expressions_for_every_role() {
         assert_eq!(
             user_search_expression("octocat", UserRole::Author, None),
             "is:pr author:octocat sort:updated-desc"
@@ -291,12 +299,20 @@ mod tests {
             ),
             "is:pr reviewed-by:octocat created:2026-01-01..2026-01-31 sort:updated-desc"
         );
+        assert_eq!(
+            user_search_expression("octocat", UserRole::ReviewRequested, None),
+            "is:pr review-requested:octocat sort:updated-desc"
+        );
     }
 
     #[test]
     fn roles_keep_separate_cursors() {
         assert_eq!(UserRole::Author.cursor_source_type(), "user");
         assert_eq!(UserRole::Reviewer.cursor_source_type(), "user_reviews");
+        assert_eq!(
+            UserRole::ReviewRequested.cursor_source_type(),
+            "user_review_requests"
+        );
     }
 
     #[test]

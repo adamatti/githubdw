@@ -28,6 +28,8 @@ fn syncs_a_user_across_repositories() {
         Ok(search_page("acme/widgets", &[1, 2])),
         // reviewed-by: one PR in a third-party repo
         Ok(search_page("other/thing", &[3])),
+        // review-requested: nothing pending
+        Ok(search_response(0, vec![])),
     ]);
     let mut client = GhClient::with_transport(Box::new(transport)).without_sleeping();
     let mut syncer = Syncer::new(warehouse.connection(), &mut client).as_of(evening_instant());
@@ -36,7 +38,7 @@ fn syncs_a_user_across_repositories() {
         .unwrap();
 
     assert_eq!(summary.pull_requests_synced, 3);
-    assert_eq!(summary.pages_fetched, 2, "one search per role");
+    assert_eq!(summary.pages_fetched, 3, "one search per role");
     assert!(summary.failed.is_empty());
     assert!(summary.notes.is_empty());
 
@@ -128,6 +130,8 @@ fn each_role_keeps_its_own_watermark() {
                 "2026-08-12T09:00:00Z",
             )],
         )),
+        // review-requested: nothing pending
+        Ok(search_response(0, vec![])),
     ]);
     let mut client = GhClient::with_transport(Box::new(transport)).without_sleeping();
     let mut syncer = Syncer::new(warehouse.connection(), &mut client).as_of(evening_instant());
@@ -174,10 +178,12 @@ fn user_rerun_stops_at_the_watermark() {
         ],
     );
     let transport = FixtureTransport::new(vec![
-        Ok(fresh.clone()), // run 1, author
-        Ok(fresh.clone()), // run 1, reviewed-by
-        Ok(fresh.clone()), // run 2, author — everything at or below cursor
-        Ok(fresh.clone()), // run 2, reviewed-by
+        Ok(fresh.clone()),              // run 1, author
+        Ok(fresh.clone()),              // run 1, reviewed-by
+        Ok(search_response(0, vec![])), // run 1, review-requested
+        Ok(fresh.clone()),              // run 2, author — everything at or below cursor
+        Ok(fresh.clone()),              // run 2, reviewed-by
+        Ok(search_response(0, vec![])), // run 2, review-requested
     ]);
     let mut client = GhClient::with_transport(Box::new(transport)).without_sleeping();
 
@@ -189,8 +195,8 @@ fn user_rerun_stops_at_the_watermark() {
         assert_eq!(first.pull_requests_synced, 4, "both roles, both PRs");
     }
     {
-        // No --days: coverage exists and both cursors are set, so this run
-        // is incremental — one unwindowed search per role.
+        // No --days: coverage exists, so this run is incremental — one
+        // unwindowed search per role.
         let mut syncer = Syncer::new(warehouse.connection(), &mut client).as_of(evening_instant());
         let second = syncer
             .sync_user("octocat", &fast_user_options(None))
@@ -200,7 +206,7 @@ fn user_rerun_stops_at_the_watermark() {
             "the boundary-second item is re-read; the strictly older one stops the walk"
         );
         assert_eq!(
-            second.pages_fetched, 2,
+            second.pages_fetched, 3,
             "no date windowing on an incremental run"
         );
     }
@@ -226,6 +232,8 @@ fn user_cursor_does_not_advance_past_a_failed_upsert() {
                 ),
             ],
         )),
+        Ok(search_response(0, vec![])),
+        // review-requested: nothing pending
         Ok(search_response(0, vec![])),
     ]);
     let mut client = GhClient::with_transport(Box::new(transport)).without_sleeping();
@@ -285,7 +293,7 @@ fn a_window_over_the_result_cap_is_split() {
 
     // The author search asks for exactly these ranges, in this order: the
     // whole window, then bisection. The ranges tile 13th..15th with no gap
-    // and no overlap. The reviewer search fits in one query.
+    // and no overlap. The reviewer searches fit in one query each.
     let mut queries = fake.requests().queries;
     queries.dedup(); // later pages of a query repeat its text
     assert_eq!(
@@ -297,6 +305,7 @@ fn a_window_over_the_result_cap_is_split() {
             "is:pr author:octocat created:2026-08-14..2026-08-14 sort:updated-desc",
             "is:pr author:octocat created:2026-08-15..2026-08-15 sort:updated-desc",
             "is:pr reviewed-by:octocat created:2026-08-13..2026-08-15 sort:updated-desc",
+            "is:pr review-requested:octocat created:2026-08-13..2026-08-15 sort:updated-desc",
         ]
     );
 
@@ -333,6 +342,8 @@ fn an_unsplittable_over_cap_window_is_reported() {
                 "2026-08-15T09:00:00Z",
             )],
         )),
+        Ok(search_response(0, vec![])),
+        // review-requested: nothing pending
         Ok(search_response(0, vec![])),
     ]);
     let mut client = GhClient::with_transport(Box::new(transport)).without_sleeping();
@@ -395,6 +406,8 @@ fn user_sync_accepts_a_namespaced_login() {
     let transport = FixtureTransport::new(vec![
         Ok(search_page("acme/widgets", &[1])),
         Ok(search_response(0, vec![])),
+        // review-requested: nothing pending
+        Ok(search_response(0, vec![])),
     ]);
     let mut client = GhClient::with_transport(Box::new(transport)).without_sleeping();
     let mut syncer = Syncer::new(warehouse.connection(), &mut client).as_of(evening_instant());
@@ -444,8 +457,10 @@ fn an_incremental_walk_that_reaches_its_watermark_reports_nothing() {
     let transport = FixtureTransport::new(vec![
         Ok(seed.clone()),
         Ok(seed.clone()),
+        Ok(search_response(0, vec![])),
         Ok(over_cap_but_converging.clone()),
         Ok(over_cap_but_converging.clone()),
+        Ok(search_response(0, vec![])),
     ]);
     let mut client = GhClient::with_transport(Box::new(transport)).without_sleeping();
 
@@ -499,10 +514,13 @@ fn large_user_walk_resumes_time_windows_without_search_offsets() {
         Ok(search_response(5000, vec![])),
         Ok(search_response(1001, vec![])),
         Ok(leaf(1, &base)),
-        // The other role has nothing newer than its existing cursor.
+        // The other roles have nothing newer than their existing cursors.
+        Ok(search_response(0, vec![])),
         Ok(search_response(0, vec![])),
         // Resume must fetch only the remaining second, no legacy probe.
         Ok(leaf(2, &search_timestamp(now.timestamp()).unwrap())),
+        Ok(search_response(0, vec![])),
+        // review-requested: nothing pending
         Ok(search_response(0, vec![])),
     ]);
     let first = Syncer::new(conn, &mut client)
@@ -554,7 +572,7 @@ fn large_user_walk_resumes_time_windows_without_search_offsets() {
     assert_eq!(stamp, search_timestamp(now.timestamp()).unwrap());
     assert!(requested_cursors(&transport).iter().all(Option::is_none));
     let calls = transport.calls.lock().unwrap();
-    let last_author_query = calls[4].iter().find(|a| a.starts_with("q=")).unwrap();
+    let last_author_query = calls[5].iter().find(|a| a.starts_with("q=")).unwrap();
     assert!(last_author_query.contains(&format!(
         "updated:{0}..{0}",
         search_timestamp(now.timestamp()).unwrap()
