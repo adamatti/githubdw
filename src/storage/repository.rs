@@ -575,6 +575,30 @@ pub enum CounterSource {
     Light,
 }
 
+/// Replace a pull request's merge-queue and auto-merge state with this fetch's.
+pub fn set_pull_request_merge_queue(
+    conn: &Connection,
+    pr_key: &str,
+    merge_queue: &crate::fetch::pull_requests::MergeQueueData,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE fact_pull_requests SET
+            is_in_merge_queue = ?2, merge_queue_state = ?3, merge_queue_position = ?4,
+            merge_queue_enqueued_at = ?5, auto_merge_enabled_at = ?6, auto_merge_method = ?7
+         WHERE pr_key = ?1",
+        params![
+            pr_key,
+            merge_queue.is_in_merge_queue as i64,
+            merge_queue.state,
+            merge_queue.position,
+            merge_queue.enqueued_at,
+            merge_queue.auto_merge_enabled_at,
+            merge_queue.auto_merge_method,
+        ],
+    )?;
+    Ok(())
+}
+
 /// Upsert a pull request without blanking stored payload.
 pub fn upsert_pull_request_preserving(
     conn: &Connection,

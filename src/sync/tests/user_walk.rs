@@ -578,3 +578,63 @@ fn large_user_walk_resumes_time_windows_without_search_offsets() {
         search_timestamp(now.timestamp()).unwrap()
     )));
 }
+
+/// Merge-queue state is stored, and a later fetch without it clears it.
+#[test]
+fn stores_and_clears_merge_queue_state() {
+    let warehouse = los_angeles_warehouse();
+    let mut queued = search_node(
+        1,
+        "acme/widgets",
+        "2026-08-14T18:00:00Z",
+        "2026-08-15T09:00:00Z",
+    );
+    queued["isInMergeQueue"] = json!(true);
+    queued["mergeQueueEntry"] =
+        json!({"state": "QUEUED", "position": 2, "enqueuedAt": "2026-08-15T09:00:00Z"});
+    queued["autoMergeRequest"] =
+        json!({"enabledAt": "2026-08-15T08:00:00Z", "mergeMethod": "SQUASH"});
+    let transport = FixtureTransport::new(vec![
+        Ok(search_response(1, vec![queued])),
+        Ok(search_response(0, vec![])),
+        Ok(search_response(0, vec![])), // review-requested: nothing pending
+    ]);
+    let mut client = GhClient::with_transport(Box::new(transport)).without_sleeping();
+    let mut syncer = Syncer::new(warehouse.connection(), &mut client).as_of(evening_instant());
+    syncer
+        .sync_user("octocat", &fast_user_options(Some(1)))
+        .unwrap();
+
+    let conn = warehouse.connection();
+    let read = |conn: &Connection| -> (i64, Option<String>, Option<i64>, Option<String>) {
+        conn.query_row(
+            "SELECT is_in_merge_queue, merge_queue_state, merge_queue_position, auto_merge_method
+             FROM fact_pull_requests WHERE number = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        read(conn),
+        (1, Some("QUEUED".into()), Some(2), Some("SQUASH".into()))
+    );
+
+    let merged = search_node(
+        1,
+        "acme/widgets",
+        "2026-08-14T18:00:00Z",
+        "2026-08-15T10:00:00Z",
+    );
+    let transport = FixtureTransport::new(vec![
+        Ok(search_response(1, vec![merged])),
+        Ok(search_response(0, vec![])),
+        Ok(search_response(0, vec![])), // review-requested: nothing pending
+    ]);
+    let mut client = GhClient::with_transport(Box::new(transport)).without_sleeping();
+    let mut syncer = Syncer::new(warehouse.connection(), &mut client).as_of(evening_instant());
+    syncer
+        .sync_user("octocat", &fast_user_options(None))
+        .unwrap();
+    assert_eq!(read(warehouse.connection()), (0, None, None, None));
+}

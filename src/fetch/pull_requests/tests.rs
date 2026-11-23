@@ -552,3 +552,28 @@ fn parses_rest_file_patches() {
     assert_eq!(patches[0].2.as_deref(), Some("@@ -1 +1 @@"));
     assert_eq!(patches[1].1.as_deref(), Some("old.rs"));
 }
+
+#[test]
+fn parses_merge_queue_and_auto_merge_state() {
+    let mut page = sample_page();
+    let node = &mut page["repository"]["pullRequests"]["nodes"][0];
+    node["isInMergeQueue"] = json!(true);
+    node["mergeQueueEntry"] =
+        json!({"state": "QUEUED", "position": 2, "enqueuedAt": "2026-11-23T20:03:43Z"});
+    node["autoMergeRequest"] = Value::Null;
+    let pull_request = parse_pull_request_page(&page)
+        .unwrap()
+        .pull_requests
+        .remove(0);
+    assert_eq!(
+        pull_request.merge_queue,
+        MergeQueueData {
+            is_in_merge_queue: true,
+            state: Some("QUEUED".into()),
+            position: Some(2),
+            enqueued_at: Some("2026-11-23T20:03:43Z".into()),
+            auto_merge_enabled_at: None,
+            auto_merge_method: None,
+        }
+    );
+}

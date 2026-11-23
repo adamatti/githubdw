@@ -87,6 +87,7 @@ pub(crate) fn pull_request_for(
         node_id: None,
         pending: vec![],
         check_runs_truncated: false,
+        merge_queue: Default::default(),
     }
 }
 

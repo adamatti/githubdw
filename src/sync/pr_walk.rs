@@ -579,6 +579,7 @@ impl Syncer<'_> {
         } else {
             repository::upsert_pull_request(conn, &row)?;
         }
+        repository::set_pull_request_merge_queue(conn, pr_key, &pull_request.merge_queue)?;
         crate::collection::mark_detail_fetched(conn, pr_key, pull_request, patches.is_some())?;
 
         for review in &pull_request.reviews {
