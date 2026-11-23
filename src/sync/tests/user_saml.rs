@@ -70,11 +70,13 @@ fn saml_middle_page() -> String {
 fn a_forbidden_node_is_skipped_and_the_rest_of_the_page_is_stored() {
     let warehouse = los_angeles_warehouse();
     let conn = warehouse.connection();
-    // run 1: author, reviewed-by; run 2 (incremental): author, reviewed-by
+    // each run: author, reviewed-by, review-requested
     let mut client = gh_like(vec![
         saml_middle_page(),
         empty(),
+        empty(),
         saml_middle_page(),
+        empty(),
         empty(),
     ]);
 
@@ -167,6 +169,8 @@ fn a_saml_message_without_a_type_is_skipped_but_a_null_node_without_an_error_fai
             vec![typeless],
         ),
         empty(),
+        // review-requested: nothing pending
+        empty(),
     ]);
     let summary = Syncer::new(warehouse.connection(), &mut client)
         .as_of(evening_instant())
@@ -199,13 +203,15 @@ fn a_page_of_only_hidden_nodes_still_reaches_the_next_page() {
         first.to_string(),
         body(2, vec![node(2, "2026-08-14T09:00:00Z")], vec![]),
         empty(),
+        // review-requested: nothing pending
+        empty(),
     ]);
     let summary = Syncer::new(warehouse.connection(), &mut client)
         .as_of(evening_instant())
         .sync_user("octocat", &fast_user_options(Some(1)))
         .unwrap();
     assert_eq!((summary.pull_requests_synced, summary.skipped), (1, 1));
-    assert_eq!(summary.pages_fetched, 3);
+    assert_eq!(summary.pages_fetched, 4);
 }
 
 #[test]

@@ -45,6 +45,9 @@ pub const PULL_REQUEST_NODE_SELECTION: &str = r#"id number title body state isDr
         additions deletions changedFiles
         author { login __typename }
         mergedBy { login __typename }
+        isInMergeQueue
+        mergeQueueEntry { state position enqueuedAt }
+        autoMergeRequest { enabledAt mergeMethod }
         reviews(first: 50) {
           pageInfo { hasNextPage endCursor }
           nodes {
@@ -195,6 +198,19 @@ pub struct PullRequestData {
     pub pending: Vec<PendingConnection>,
     /// True until pending head-commit check suites and runs are hydrated.
     pub check_runs_truncated: bool,
+    pub merge_queue: MergeQueueData,
+}
+
+/// Merge-queue and auto-merge state as of this fetch. Absent objects mean the
+/// PR is not queued / has no auto-merge request.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MergeQueueData {
+    pub is_in_merge_queue: bool,
+    pub state: Option<String>,
+    pub position: Option<i64>,
+    pub enqueued_at: Option<String>,
+    pub auto_merge_enabled_at: Option<String>,
+    pub auto_merge_method: Option<String>,
 }
 
 /// Node selections reused by the continuation queries; they must match the
@@ -547,7 +563,26 @@ pub fn parse_pull_request_node_with_files(
         node_id,
         pending,
         check_runs_truncated,
+        merge_queue: parse_merge_queue(node),
     })
+}
+
+fn parse_merge_queue(node: &Value) -> MergeQueueData {
+    let entry = node.get("mergeQueueEntry").filter(|v| !v.is_null());
+    let auto_merge = node.get("autoMergeRequest").filter(|v| !v.is_null());
+    MergeQueueData {
+        is_in_merge_queue: node
+            .get("isInMergeQueue")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        state: entry.and_then(|e| string_field(e, "state")),
+        position: entry
+            .and_then(|e| e.get("position"))
+            .and_then(Value::as_i64),
+        enqueued_at: entry.and_then(|e| string_field(e, "enqueuedAt")),
+        auto_merge_enabled_at: auto_merge.and_then(|a| string_field(a, "enabledAt")),
+        auto_merge_method: auto_merge.and_then(|a| string_field(a, "mergeMethod")),
+    }
 }
 
 /// The head commit selected by `commits(last: 1)`.

@@ -10,9 +10,9 @@ pub mod user_search;
 
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,12 +25,55 @@ use rate_limit::RateLimitTracker;
 pub trait GhTransport: Send + Sync {
     /// Run `gh` with the given arguments and return stdout on success.
     fn run(&self, arguments: &[String]) -> Result<String>;
+
+    /// Whether separate clients may share this transport for parallel work.
+    fn supports_parallel_requests(&self) -> bool {
+        false
+    }
 }
 
 /// Default wall-clock limit for one `gh` invocation.
 const GH_TIMEOUT: Duration = Duration::from_secs(120);
 /// Environment variable overriding the 120-second `gh` deadline, in whole seconds.
 pub const GH_DEADLINE_ENV: &str = "GITHUBDW_GH_DEADLINE_SECS";
+/// Set to a non-empty value to log each `gh` request's operation and timing.
+pub const GH_CALL_LOG_ENV: &str = "GITHUBDW_LOG_GH_CALLS";
+/// Set to a non-empty value to include GraphQL query text in request logs.
+pub const GH_QUERY_LOG_ENV: &str = "GITHUBDW_LOG_GH_QUERIES";
+
+fn gh_call_logging_enabled() -> bool {
+    std::env::var_os(GH_CALL_LOG_ENV).is_some_and(|value| !value.is_empty())
+}
+
+fn gh_query_logging_enabled() -> bool {
+    std::env::var_os(GH_QUERY_LOG_ENV).is_some_and(|value| !value.is_empty())
+}
+
+/// A safe operation label: never include GraphQL query text or variables.
+fn gh_operation(arguments: &[String]) -> String {
+    match arguments.get(1).map(String::as_str) {
+        Some("graphql") => "gh api graphql".into(),
+        Some("api") => format!(
+            "gh api {}",
+            arguments
+                .get(2)
+                .and_then(|path| path.split('?').next())
+                .unwrap_or_default()
+        ),
+        Some(command) => format!("gh {command}"),
+        None => "gh".into(),
+    }
+}
+
+fn graphql_query(arguments: &[String]) -> Option<&str> {
+    arguments.windows(2).find_map(|pair| {
+        if pair[0] == "-f" {
+            pair[1].strip_prefix("query=")
+        } else {
+            None
+        }
+    })
+}
 
 /// Real transport: shells out to the `gh` binary on PATH.
 pub struct GhCommandLine {
@@ -110,6 +153,10 @@ pub(crate) fn interpret_gh_output(
 }
 
 impl GhTransport for GhCommandLine {
+    fn supports_parallel_requests(&self) -> bool {
+        true
+    }
+
     fn run(&self, arguments: &[String]) -> Result<String> {
         let mut child = Command::new(&self.program)
             .args(arguments)
@@ -219,8 +266,8 @@ const SEARCH_MIN_INTERVAL: Duration = Duration::from_millis(2100);
 
 /// Client for the GitHub API via the `gh` CLI.
 pub struct GhClient {
-    transport: Box<dyn GhTransport>,
-    rate_limit: RateLimitTracker,
+    transport: Arc<dyn GhTransport>,
+    rate_limit: Arc<Mutex<RateLimitTracker>>,
     /// Optional pacing delay between requests (bulk-sync politeness).
     inter_request_delay: Option<Duration>,
     /// When false (tests), never actually sleep.
@@ -231,7 +278,7 @@ pub struct GhClient {
     /// before refusing locally with [`Error::QuotaReserve`]. `None` = no cap.
     request_allowance: Option<u64>,
     /// Requests (attempts, retries included) issued over the transport.
-    requests_issued: u64,
+    requests_issued: Arc<std::sync::atomic::AtomicU64>,
     /// When set, every call reads the provider's `x-ratelimit-*` response
     /// headers and refuses locally before spending into the reserve.
     quota_guard: Option<QuotaGuard>,
@@ -241,7 +288,7 @@ pub struct GhClient {
     /// returns [`Error::RateLimited`] with the wake time instead.
     defer_waits_over: Option<Duration>,
     /// Response bytes received (stdout length), for cost measurement.
-    bytes_received: u64,
+    bytes_received: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Rate-limit state observed from data responses (never from the separate
@@ -334,18 +381,43 @@ impl GhClient {
     /// Create a client over a custom transport (fixtures in tests).
     pub fn with_transport(transport: Box<dyn GhTransport>) -> Self {
         Self {
-            transport,
-            rate_limit: RateLimitTracker::new(),
+            transport: Arc::from(transport),
+            rate_limit: Arc::new(Mutex::new(RateLimitTracker::new())),
             inter_request_delay: None,
             sleeping_enabled: true,
             last_search_at: None,
             request_allowance: None,
-            requests_issued: 0,
+            requests_issued: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             quota_guard: None,
             cancel: None,
             defer_waits_over: None,
-            bytes_received: 0,
+            bytes_received: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// A worker client sharing the real command transport and API rate state.
+    /// Quota-guarded or request-budgeted clients stay sequential because those
+    /// budgets are intentionally local to one client.
+    pub(crate) fn parallel_worker(&self) -> Option<Self> {
+        if !self.transport.supports_parallel_requests()
+            || self.request_allowance.is_some()
+            || self.quota_guard.is_some()
+        {
+            return None;
+        }
+        Some(Self {
+            transport: Arc::clone(&self.transport),
+            rate_limit: Arc::clone(&self.rate_limit),
+            inter_request_delay: self.inter_request_delay,
+            sleeping_enabled: self.sleeping_enabled,
+            last_search_at: None,
+            request_allowance: None,
+            requests_issued: Arc::clone(&self.requests_issued),
+            quota_guard: None,
+            cancel: self.cancel.clone(),
+            defer_waits_over: self.defer_waits_over,
+            bytes_received: Arc::clone(&self.bytes_received),
+        })
     }
 
     /// Observe `flag`: once it is set, the next request (or the current wait)
@@ -362,7 +434,7 @@ impl GhClient {
 
     /// Response bytes received over the transport so far.
     pub fn bytes_received(&self) -> u64 {
-        self.bytes_received
+        self.bytes_received.load(Ordering::Relaxed)
     }
 
     fn cancelled(&self) -> bool {
@@ -452,7 +524,7 @@ impl GhClient {
 
     /// Requests issued over the transport so far (every attempt).
     pub fn requests_issued(&self) -> u64 {
-        self.requests_issued
+        self.requests_issued.load(Ordering::Relaxed)
     }
 
     /// Disable real sleeping (test fixtures).
@@ -469,10 +541,27 @@ impl GhClient {
 
     /// Verify `gh` is installed and authenticated. Call once at startup.
     pub fn preflight(&self) -> Result<()> {
+        let started = Instant::now();
+        if gh_call_logging_enabled() {
+            eprintln!("githubdw: GH request start: gh auth status");
+        }
         self.transport
             .run(&["auth".into(), "status".into()])
-            .map(|_| ())
+            .map(|_| {
+                if gh_call_logging_enabled() {
+                    eprintln!(
+                        "githubdw: GH request complete: gh auth status ({:.3}s)",
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+            })
             .map_err(|error| {
+                if gh_call_logging_enabled() {
+                    eprintln!(
+                        "githubdw: GH request failed: gh auth status ({:.3}s): {error}",
+                        started.elapsed().as_secs_f64()
+                    );
+                }
                 Error::GhUnavailable(format!(
                     "`gh auth status` failed — install the GitHub CLI and run `gh auth login` \
                      (set GH_HOST for GitHub Enterprise): {error}"
@@ -599,7 +688,12 @@ impl GhClient {
         }
         // Primary rate limit: sleep until reset before issuing the call, or
         // report the wake time when the caller defers long waits.
-        if let Some(wait) = self.rate_limit.wait_needed() {
+        let wait_needed = self
+            .rate_limit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .wait_needed();
+        if let Some(wait) = wait_needed {
             self.wait_for_rate_limit(
                 "graphql",
                 wait,
@@ -662,10 +756,33 @@ impl GhClient {
                 }
                 self.request_allowance = Some(allowance - 1);
             }
-            self.requests_issued += 1;
+            self.requests_issued.fetch_add(1, Ordering::Relaxed);
+            let started = Instant::now();
+            if gh_call_logging_enabled() {
+                eprintln!(
+                    "githubdw: GH request start: {} (attempt {})",
+                    gh_operation(arguments),
+                    attempt + 1
+                );
+                if gh_query_logging_enabled()
+                    && let Some(query) = graphql_query(arguments)
+                {
+                    eprintln!("githubdw: GraphQL query:\n{query}");
+                }
+            }
             match self.transport.run(sent) {
                 Ok(stdout) => {
-                    self.bytes_received += stdout.len() as u64;
+                    self.bytes_received
+                        .fetch_add(stdout.len() as u64, Ordering::Relaxed);
+                    if gh_call_logging_enabled() {
+                        eprintln!(
+                            "githubdw: GH request complete: {} (attempt {}, {:.3}s, {} bytes)",
+                            gh_operation(arguments),
+                            attempt + 1,
+                            started.elapsed().as_secs_f64(),
+                            stdout.len()
+                        );
+                    }
                     let Some(guard) = &mut self.quota_guard else {
                         return serde_json::from_str(&stdout).map_err(Error::from);
                     };
@@ -687,6 +804,14 @@ impl GhClient {
                     return serde_json::from_str(body).map_err(Error::from);
                 }
                 Err(error) => {
+                    if gh_call_logging_enabled() {
+                        eprintln!(
+                            "githubdw: GH request failed: {} (attempt {}, {:.3}s): {error}",
+                            gh_operation(arguments),
+                            attempt + 1,
+                            started.elapsed().as_secs_f64()
+                        );
+                    }
                     attempt += 1;
                     if probe || attempt >= RETRY_ATTEMPTS || !is_retryable(&error) {
                         return Err(error);
@@ -711,7 +836,10 @@ impl GhClient {
 
     fn observe_rate_limit(&mut self, data: &Value) {
         if let Some(block) = data.get("rateLimit") {
-            self.rate_limit.observe(block);
+            self.rate_limit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .observe(block);
         }
     }
 }

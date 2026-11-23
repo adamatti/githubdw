@@ -74,7 +74,7 @@ accepts a global `--db <path>` to use a different file.
 ```bash
 githubdw sync repo <owner/name> [--days N] [--skip-diffs] [--pull-requests-only | --issues-only]
 githubdw sync user <login>      [--days N] [--skip-diffs]
-githubdw sync all            # sync every enabled monitored source
+githubdw sync all [--jobs N] # sync monitored sources (default: 4 concurrent)
 githubdw sync watch          # print one snapshot of any sync in progress, then exit
 ```
 
@@ -116,11 +116,20 @@ githubdw monitor list
 githubdw monitor remove owner/name
 ```
 
-`sync all` runs repositories first, then users, and prints a line for every
+`sync all` runs up to four sources concurrently by default (`--jobs` accepts
+1–16). Each source has its own GitHub client and database connection; a source
+keeps its existing sequential, checkpointed walk. User searches are limited to
+one active source at a time to stay within GitHub's shared search request
+budget. The scheduler records the first source in each active batch, so an
+interrupted batch is safely retried. It prints a line for every
 enabled source it will not serve — an unimplemented source type or a disabled
 row is named, never dropped in silence. Monitored **orgs** are one such
 source: `sync all` currently names and skips them rather than syncing their
 repositories.
+
+Per-PR detail hydration also runs concurrently, four PRs at a time by default.
+Set `GITHUBDW_PR_HYDRATION_JOBS` to 1–16 to tune it (`1` disables this
+parallelism). This applies to repository and user syncs.
 
 ### Re-fetching specific items
 
@@ -238,6 +247,11 @@ Everything goes through the `gh` CLI, so GitHub Enterprise works by pointing
 ```bash
 GH_HOST=github.example.com githubdw sync repo owner/name
 ```
+
+Set `GITHUBDW_LOG_GH_CALLS=1` to log GitHub CLI request operations, attempts,
+durations, response sizes, and failures to stderr. Set
+`GITHUBDW_LOG_GH_QUERIES=1` to include GraphQL query text in those logs. Query
+variables are omitted.
 
 ## Configuration
 

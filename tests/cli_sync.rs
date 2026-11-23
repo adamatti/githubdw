@@ -32,6 +32,9 @@ fn repo_sync_reports_what_it_stored_then_reports_up_to_date() {
 #[test]
 fn sync_refuses_to_start_without_an_authenticated_gh() {
     let cli = Cli::new();
+    // `sync all` has no work (and no reason to call gh) unless a source is
+    // monitored, so configure one before checking its auth preflight.
+    cli.run(&["monitor", "add-repo", REPO]).ok();
     cli.fail_auth();
     for arguments in [
         vec!["sync", "repo", REPO],
@@ -160,10 +163,12 @@ fn sync_repo_exits_nonzero_when_one_item_fails() {
 }
 
 #[test]
-fn sync_all_exits_one_when_gh_is_unauthenticated() {
+fn sync_all_reports_partial_failure_when_gh_is_unauthenticated() {
     let cli = Cli::new();
+    cli.run(&["monitor", "add-repo", REPO]).ok();
     cli.fail_auth();
-    cli.run(&["sync", "all"]).code(1);
+    let run = cli.run(&["sync", "all"]).code(3);
+    assert!(run.stderr.contains("gh auth login"), "{}", run.stderr);
 }
 
 #[test]

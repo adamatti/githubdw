@@ -13,7 +13,12 @@ fn user_path_follows_nested_connection_cursors() {
         "createdAt": "2020-01-01T00:00:00Z"
     });
     let (mut client, _) = routing_client(
-        vec![search_response(1, vec![node]), search_response(0, vec![])],
+        vec![
+            search_response(1, vec![node]),
+            search_response(0, vec![]),
+            // review-requested: nothing pending
+            search_response(0, vec![]),
+        ],
         heavy_pr_continuations(),
     );
     let mut syncer = Syncer::new(warehouse.connection(), &mut client).as_of(evening_instant());

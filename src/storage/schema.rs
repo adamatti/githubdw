@@ -51,7 +51,39 @@ pub fn init(conn: &mut Connection) -> Result<()> {
     ensure_sort_indexes(conn)?;
     ensure_lock_holder_column(conn)?;
     ensure_review_thread_tables(conn)?;
+    ensure_merge_queue_columns(conn)?;
     Ok(())
+}
+
+/// Merge-queue and auto-merge state on `fact_pull_requests`. Additive and
+/// outside the numbered migrations for the same reason as
+/// [`ensure_lock_holder_column`].
+pub fn ensure_merge_queue_columns(conn: &Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('fact_pull_requests')
+                       WHERE name = 'is_in_merge_queue')",
+        [],
+        |r| r.get(0),
+    )?;
+    if exists {
+        return Ok(());
+    }
+    let transaction = conn.unchecked_transaction()?;
+    match transaction.execute_batch(
+        "ALTER TABLE fact_pull_requests ADD COLUMN is_in_merge_queue INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE fact_pull_requests ADD COLUMN merge_queue_state TEXT;
+         ALTER TABLE fact_pull_requests ADD COLUMN merge_queue_position INTEGER;
+         ALTER TABLE fact_pull_requests ADD COLUMN merge_queue_enqueued_at TEXT;
+         ALTER TABLE fact_pull_requests ADD COLUMN auto_merge_enabled_at TEXT;
+         ALTER TABLE fact_pull_requests ADD COLUMN auto_merge_method TEXT;",
+    ) {
+        Ok(()) => Ok(transaction.commit()?),
+        // Another process added them between the check and the ALTER.
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("duplicate column") => {
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// `sync_locks.holder_pid`: the process holding each lock, so a lock left by

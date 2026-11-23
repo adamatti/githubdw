@@ -1,10 +1,9 @@
 name: CI
 
+# /FIXME: This is a personal playground change; do not push it to adlio/githubdw.
 on:
+  # Push checks also run for branches attached to PRs, avoiding duplicate CI runs.
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_call:
 
 env:

@@ -80,6 +80,12 @@ const INITIAL_WINDOW_DAYS: i64 = 90;
 /// collections as repository nodes, so the same conservative page applies.
 const SEARCH_PAGE_SIZE: u32 = 25;
 
+/// Default and maximum concurrent pull-request hydration workers.
+pub const DEFAULT_PR_HYDRATION_JOBS: usize = 4;
+pub const MAX_PR_HYDRATION_JOBS: usize = 16;
+/// Environment variable controlling concurrent per-PR hydration.
+pub const PR_HYDRATION_JOBS_ENV: &str = "GITHUBDW_PR_HYDRATION_JOBS";
+
 /// How far a created-date window may be bisected before giving up on the
 /// 1,000-result cap. A month halved eight times is under four hours, well past
 /// the point where a further split can help.
@@ -99,6 +105,8 @@ pub struct Syncer<'a> {
     /// When set, a pull request whose API file listing is capped, short, or
     /// contradictory is completed from git (see [`git_files`]).
     git_recovery: Option<GitRecoveryConfig>,
+    /// Maximum PRs whose nested API connections are hydrated concurrently.
+    pr_hydration_jobs: usize,
     /// Collection policy gate, re-read at every write boundary. Its
     /// `requested` value is derived from `SyncOptions::skip_diffs` unless the
     /// caller sets one explicitly with [`Syncer::with_diff_retention`].
@@ -140,6 +148,11 @@ impl<'a> Syncer<'a> {
             now: Utc::now(),
             item_budget: None,
             git_recovery: None,
+            pr_hydration_jobs: std::env::var(PR_HYDRATION_JOBS_ENV)
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .map(|jobs| jobs.clamp(1, MAX_PR_HYDRATION_JOBS))
+                .unwrap_or(DEFAULT_PR_HYDRATION_JOBS),
             gate: crate::retention::RetentionGate::new(
                 crate::retention::DiffRetention::Retain,
                 default_policy_source(),
@@ -177,6 +190,12 @@ impl<'a> Syncer<'a> {
     /// Complete capped or contradictory pull-request file listings from git.
     pub fn with_git_recovery(mut self, config: GitRecoveryConfig) -> Self {
         self.git_recovery = Some(config);
+        self
+    }
+
+    /// Limit concurrent per-pull-request API hydration (1–16).
+    pub fn with_pr_hydration_jobs(mut self, jobs: usize) -> Self {
+        self.pr_hydration_jobs = jobs.clamp(1, MAX_PR_HYDRATION_JOBS);
         self
     }
 

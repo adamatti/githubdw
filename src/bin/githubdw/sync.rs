@@ -35,6 +35,34 @@ fn git_recovery_for(warehouse: &GithubDW) -> Option<GitRecoveryConfig> {
     Some(GitRecoveryConfig::github(parent.join("git-cache")))
 }
 
+fn run_all_source(
+    database_path: PathBuf,
+    source: githubdw::sync::SyncSource,
+) -> std::result::Result<(String, githubdw::sync::SyncSummary), (String, String)> {
+    let label = match &source {
+        githubdw::sync::SyncSource::User(login) => format!("user {login}"),
+        githubdw::sync::SyncSource::Repository(repo) => repo.clone(),
+    };
+    let run = || -> githubdw::Result<githubdw::sync::SyncSummary> {
+        let warehouse = GithubDW::open(database_path)?;
+        let mut client = githubdw::fetch::GhClient::new();
+        client.preflight()?;
+        let options = githubdw::sync::SyncOptions::default();
+        let mut syncer = githubdw::sync::Syncer::new(warehouse.connection(), &mut client)
+            .with_item_budget(SYNC_ALL_REPO_ITEM_BUDGET);
+        if let Some(config) = git_recovery_for(&warehouse) {
+            syncer = syncer.with_git_recovery(config);
+        }
+        match source {
+            githubdw::sync::SyncSource::User(login) => syncer.sync_user(&login, &options),
+            githubdw::sync::SyncSource::Repository(repo) => syncer.sync_repository(&repo, &options),
+        }
+    };
+    run()
+        .map(|summary| (label.clone(), summary))
+        .map_err(|error| (label, error.to_string()))
+}
+
 pub fn run(db: Option<PathBuf>, command: SyncCommand) -> githubdw::Result<ExitCode> {
     // Plans only read: open without migrating or taking write locks.
     let warehouse = if matches!(
@@ -129,9 +157,7 @@ pub fn run(db: Option<PathBuf>, command: SyncCommand) -> githubdw::Result<ExitCo
             }
             return Ok(exit_for(!summary.failed.is_empty()));
         }
-        SyncCommand::All => {
-            let mut client = githubdw::fetch::GhClient::new();
-            client.preflight()?;
+        SyncCommand::All { jobs } => {
             let sources = githubdw::storage::monitor_repository::list(warehouse.connection())?;
             let plan = githubdw::sync::plan_all(&sources);
             // Printed before any work, so a source this build cannot
@@ -141,54 +167,77 @@ pub fn run(db: Option<PathBuf>, command: SyncCommand) -> githubdw::Result<ExitCo
             }
             let sources = plan.fair_sources(warehouse.connection())?;
             let mut failed_sources = 0usize;
-            for (index, source) in sources.iter().enumerate() {
-                // Record the successor first: a killed run resumes at
-                // another source rather than starving it indefinitely.
+            let database_path = warehouse.database_path().to_path_buf();
+            let jobs = jobs as usize;
+            let mut start = 0;
+            while start < sources.len() {
+                let mut end = (start + jobs).min(sources.len());
+                // GitHub's search quota is shared across users, while each
+                // client paces its own search calls. Keep at most one user
+                // walk in flight so parallel clients cannot multiply that
+                // request rate.
+                if let Some(second_user) = sources[start..end]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, source)| matches!(source, githubdw::sync::SyncSource::User(_)))
+                    .nth(1)
+                {
+                    end = start + second_user.0;
+                }
+                let batch = &sources[start..end];
+                // On interruption, replay the in-flight batch from its first
+                // source. Once it finishes, advance past the whole batch.
                 githubdw::sync::SyncPlan::checkpoint_next_source(
                     warehouse.connection(),
-                    &sources[(index + 1) % sources.len()],
+                    &sources[start],
                 )?;
-                let options = githubdw::sync::SyncOptions::default();
-                let mut syncer = githubdw::sync::Syncer::new(warehouse.connection(), &mut client)
-                    .with_item_budget(SYNC_ALL_REPO_ITEM_BUDGET);
-                if let Some(config) = git_recovery_for(&warehouse) {
-                    syncer = syncer.with_git_recovery(config);
-                }
-                let (label, outcome) = match source {
-                    githubdw::sync::SyncSource::User(login) => {
-                        (format!("user {login}"), syncer.sync_user(login, &options))
-                    }
-                    githubdw::sync::SyncSource::Repository(repo) => {
-                        (repo.clone(), syncer.sync_repository(repo, &options))
-                    }
-                };
-                match outcome {
-                    Ok(summary) => {
-                        println!(
-                            "{label}: {} PRs, {} issues{}",
-                            summary.pull_requests_synced,
-                            summary.issues_synced,
-                            if summary.partial {
-                                " (partial, resumes next run)"
-                            } else {
-                                ""
+                let outcomes = std::thread::scope(|scope| {
+                    let workers = batch
+                        .iter()
+                        .cloned()
+                        .map(|source| {
+                            let path = database_path.clone();
+                            scope.spawn(move || run_all_source(path, source))
+                        })
+                        .collect::<Vec<_>>();
+                    workers
+                        .into_iter()
+                        .map(|worker| worker.join().expect("sync worker panicked"))
+                        .collect::<Vec<_>>()
+                });
+                for outcome in outcomes {
+                    match outcome {
+                        Ok((label, summary)) => {
+                            println!(
+                                "{label}: {} PRs, {} issues{}",
+                                summary.pull_requests_synced,
+                                summary.issues_synced,
+                                if summary.partial {
+                                    " (partial, resumes next run)"
+                                } else {
+                                    ""
+                                }
+                            );
+                            for note in &summary.notes {
+                                println!("  {note}");
                             }
-                        );
-                        for note in &summary.notes {
-                            println!("  {note}");
+                            for (item, error) in &summary.failed {
+                                eprintln!("failed {item}: {error}");
+                            }
+                            if !summary.failed.is_empty() {
+                                failed_sources += 1;
+                            }
                         }
-                        for (item, error) in &summary.failed {
-                            eprintln!("failed {item}: {error}");
-                        }
-                        if !summary.failed.is_empty() {
+                        Err((label, error)) => {
+                            eprintln!("{label}: {error}");
                             failed_sources += 1;
                         }
                     }
-                    Err(error) => {
-                        eprintln!("{label}: {error}");
-                        failed_sources += 1;
-                    }
                 }
+                if let Some(next) = sources.get(start + batch.len()) {
+                    githubdw::sync::SyncPlan::checkpoint_next_source(warehouse.connection(), next)?;
+                }
+                start += batch.len();
             }
             if failed_sources > 0 {
                 eprintln!("{failed_sources} of {} sources failed", sources.len());

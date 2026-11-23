@@ -20,12 +20,41 @@ impl RateLimitTracker {
 
     /// Record the `rateLimit { limit cost remaining resetAt }` block.
     pub fn observe(&mut self, block: &Value) {
-        self.last_cost = block.get("cost").and_then(Value::as_i64);
-        self.remaining = block.get("remaining").and_then(Value::as_i64);
-        self.reset_at = block
+        let cost = block.get("cost").and_then(Value::as_i64);
+        let remaining = block.get("remaining").and_then(Value::as_i64);
+        let reset_at = block
             .get("resetAt")
             .and_then(Value::as_str)
             .and_then(|text| text.parse::<DateTime<Utc>>().ok());
+
+        // Parallel calls can complete out of order. For the same reset window,
+        // keep the lowest observed remaining quota and highest cost so an
+        // older response cannot make the shared tracker look healthier.
+        if self
+            .reset_at
+            .as_ref()
+            .zip(reset_at.as_ref())
+            .is_some_and(|(current, incoming)| incoming < current)
+        {
+            return;
+        }
+        if self
+            .reset_at
+            .as_ref()
+            .zip(reset_at.as_ref())
+            .is_some_and(|(current, incoming)| incoming == current)
+        {
+            self.last_cost = self.last_cost.max(cost);
+            self.remaining = match (self.remaining, remaining) {
+                (Some(current), Some(incoming)) => Some(current.min(incoming)),
+                (current, incoming) => current.or(incoming),
+            };
+            return;
+        }
+
+        self.last_cost = cost;
+        self.remaining = remaining;
+        self.reset_at = reset_at;
     }
 
     /// If remaining budget is below the safety floor, how long to sleep.

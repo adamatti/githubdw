@@ -85,7 +85,7 @@ impl Syncer<'_> {
         // old PR whose `updated_at` already sits below the cursor.
         let incremental = options.days.is_none() && coverage_before.is_some();
         let roles = UserRole::all();
-        let mut watermarks = [WalkWatermark::default(), WalkWatermark::default()];
+        let mut watermarks = roles.map(|_| WalkWatermark::default());
         let mut cursors = Vec::with_capacity(roles.len());
         for role in roles {
             cursors.push(sync_state::last_updated_cursor(
@@ -98,7 +98,9 @@ impl Syncer<'_> {
             // Each role from its own watermark; a role with none yet walks
             // the short window since the end of coverage.
             for (index, role) in roles.into_iter().enumerate() {
-                if cursors[index].is_some() {
+                // Pending review requests can predate coverage and the set is
+                // small, so a role added after coverage walks it unwindowed.
+                if cursors[index].is_some() || role == UserRole::ReviewRequested {
                     self.walk_user_search(
                         login,
                         role,
@@ -127,8 +129,8 @@ impl Syncer<'_> {
                 }
             }
         } else {
-            // Newest month first, each month recorded as covered once both
-            // roles finished it cleanly. A walk stopped part-way (a killed
+            // Newest month first, each month recorded as covered once every
+            // role finished it cleanly. A walk stopped part-way (a killed
             // process, a timeout) keeps every month it finished, and the next
             // run skips them; coverage only ever grows back from the present,
             // so it never claims a month it skipped.
@@ -335,6 +337,19 @@ impl Syncer<'_> {
             note_inaccessible(login, role, &page, summary);
 
             let page_is_empty = page.items.is_empty() && page.inaccessible.is_empty();
+            let mut items_to_hydrate = Vec::new();
+            for item in &page.items {
+                if let (Some(cursor), Some(updated)) =
+                    (cursor_stop, item.pull_request.updated_at.as_deref())
+                    && updated < cursor
+                {
+                    break;
+                }
+                items_to_hydrate.push(item.pull_request.clone());
+            }
+            let mut hydrated = self
+                .hydrate_pull_requests_parallel(&items_to_hydrate)
+                .map(Vec::into_iter);
             for item in &page.items {
                 // Strict comparison, exactly as the repository walk does it: an
                 // item updated in the same second as the cursor may have missed
@@ -358,15 +373,32 @@ impl Syncer<'_> {
                     item.repository.created_at.as_deref(),
                 )?;
                 let pr_key = format!("{repo_key}#{}", item.pull_request.number);
-                match self.upsert_one_pull_request(
-                    &repo_key,
-                    &pr_key,
-                    &item.pull_request,
-                    timezone,
-                    core_hours,
-                    &bot_suffix,
-                    options,
-                ) {
+                let outcome = if let Some(hydrated) = &mut hydrated {
+                    match hydrated.next().expect("every eligible PR was hydrated") {
+                        Ok((pull_request, note)) => self.upsert_hydrated_pull_request(
+                            &repo_key,
+                            &pr_key,
+                            pull_request,
+                            note,
+                            timezone,
+                            core_hours,
+                            &bot_suffix,
+                            options,
+                        ),
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    self.upsert_one_pull_request(
+                        &repo_key,
+                        &pr_key,
+                        &item.pull_request,
+                        timezone,
+                        core_hours,
+                        &bot_suffix,
+                        options,
+                    )
+                };
+                match outcome {
                     Ok(note) => {
                         summary.notes.extend(note);
                         summary.pull_requests_synced += 1;
